@@ -12,11 +12,11 @@
 # *******************************************************************************
 
 # Workflow configuration for S-CORE CI - Bazel Build & Test communication module for target platforms
-# This workflow runs Bazel build and test for QNX when triggered by specific pull request events.
+# This workflow runs as optional on pull requests and strict on merge queue/workflow callers.
 
 name: Bazel Build & Test communication module (target-platforms)
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, reopened, synchronize]
   merge_group:
     types: [checks_requested]
@@ -29,67 +29,117 @@ on:
       SCORE_QNX_PASSWORD:
         required: true
 
-env:
-  LICENSE_DIR: "/opt/score_qnx/license"
 jobs:
-    build_and_test_qnx:
-      name: build_and_test_qnx${{ matrix.identifier }}
-      strategy:
-        fail-fast: false
-        matrix:
-          bazel-config: ["qnx_x86_64", "qnx_arm64"]
-          include:
-            - bazel-config: "qnx_x86_64"
-              identifier: ""
-              incompatible_targets:
-                - "-//score/mw/com/requirements/..." # Uninvestigated problem
-                - "-//score/mw/com/performance_benchmarks/..." # Uninvestigated problem
-                - "-//score/mw/com/doc/..." # Uninvestigated problem
-                - "-//score/mw/com/design/..." # Uninvestigated problem
-            - bazel-config: "qnx_arm64"
-              identifier: "_arm64"
-              incompatible_targets:
-                - "-//score/mw/com/requirements/..." # Uninvestigated problem
-                - "-//score/mw/com/performance_benchmarks/..." # Uninvestigated problem
-                - "-//score/mw/com/doc/..." # Uninvestigated problem
-                - "-//score/mw/com/design/..." # Uninvestigated problem
-      runs-on: ubuntu-24.04
-      permissions:
-        contents: read
-        pull-requests: read
-      environment: "workflow-approval"
-      steps:
-        - name: Checkout repository
-          uses: actions/checkout@v4.2.2
-          with:
-            ref: ${{ github.head_ref || github.event.pull_request.head.ref || github.ref }}
-            repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-        - name: Free Disk Space (Ubuntu)
-          uses: ./actions/free_disk_space
-        - name: Setup Bazel
-          uses: bazel-contrib/setup-bazel@0.15.0
-          with:
-            bazelisk-cache: true
-            disk-cache: ${{ github.workflow }}-${{ matrix.bazel-config }}
-            repository-cache: true
-        - name: Allow linux-sandbox
-          uses: ./actions/unblock_user_namespace_for_linux_sandbox
-        - name: Setup QNX License
-          if: ${{ contains(matrix.bazel-config, 'qnx') }}
-          env:
-            SCORE_QNX_LICENSE: ${{ secrets.SCORE_QNX_LICENSE }}
-          run: |
-            set -euo pipefail
+  qnx_precheck:
+    name: qnx_precheck
+    runs-on: ubuntu-24.04
+    outputs:
+      has-secrets: ${{ steps.check.outputs.has-secrets }}
+      missing-secrets: ${{ steps.check.outputs.missing-secrets }}
+      is-strict-trigger: ${{ steps.check.outputs.is-strict-trigger }}
+      should-run-matrix: ${{ steps.check.outputs.should-run-matrix }}
+    steps:
+      - name: Evaluate trigger mode and QNX secret availability
+        id: check
+        env:
+          SCORE_QNX_LICENSE: ${{ secrets.SCORE_QNX_LICENSE }}
+          SCORE_QNX_USER: ${{ secrets.SCORE_QNX_USER }}
+          SCORE_QNX_PASSWORD: ${{ secrets.SCORE_QNX_PASSWORD }}
+        run: |
+          set -euo pipefail
 
-            sudo mkdir -p "${{ env.LICENSE_DIR }}"
-            echo "${SCORE_QNX_LICENSE}" | base64 --decode | sudo tee "${{ env.LICENSE_DIR }}/licenses" >/dev/null
-        - name: Build targets
-          env:
-            SCORE_QNX_USER: ${{ secrets.SCORE_QNX_USER }}
-            SCORE_QNX_PASSWORD: ${{ secrets.SCORE_QNX_PASSWORD }}
-          run: |
-            bazel build --config ${{ matrix.bazel-config }} -- //score/... ${{ join(matrix.incompatible_targets, ' ') }}
-        - name: Cleanup QNX License
-          if: ${{ contains(matrix.bazel-config, 'qnx') && !cancelled() }}
-          run: sudo rm -rf ${{ env.LICENSE_DIR }}
-          # TODO Run tests on QNX QEMU
+          is_strict_trigger=false
+          if [ "${GITHUB_EVENT_NAME}" = "merge_group" ] || [ "${GITHUB_EVENT_NAME}" = "workflow_call" ]; then
+            is_strict_trigger=true
+          fi
+
+          missing=()
+
+          if [ -z "${SCORE_QNX_LICENSE}" ]; then
+            missing+=("SCORE_QNX_LICENSE")
+          fi
+
+          if [ -z "${SCORE_QNX_USER}" ]; then
+            missing+=("SCORE_QNX_USER")
+          fi
+
+          if [ -z "${SCORE_QNX_PASSWORD}" ]; then
+            missing+=("SCORE_QNX_PASSWORD")
+          fi
+
+          if [ "${#missing[@]}" -eq 0 ]; then
+            has_secrets=true
+            missing_secrets=""
+          else
+            has_secrets=false
+            missing_secrets="${missing[*]}"
+          fi
+
+          should_run_matrix="${has_secrets}"
+
+          echo "is-strict-trigger=${is_strict_trigger}" >> "$GITHUB_OUTPUT"
+          echo "has-secrets=${has_secrets}" >> "$GITHUB_OUTPUT"
+          echo "missing-secrets=${missing_secrets}" >> "$GITHUB_OUTPUT"
+          echo "should-run-matrix=${should_run_matrix}" >> "$GITHUB_OUTPUT"
+
+  run_qnx_matrix:
+    name: build_and_test_qnx${{ matrix.identifier }}
+    needs: qnx_precheck
+    if: ${{ needs.qnx_precheck.outputs.should-run-matrix == 'true' || needs.qnx_precheck.outputs.is-strict-trigger == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        bazel-config: ["qnx_x86_64", "qnx_arm64"]
+        include:
+          - bazel-config: "qnx_x86_64"
+            identifier: ""
+            incompatible_targets:
+              - "-//score/mw/com/requirements/..." # Uninvestigated problem
+              - "-//score/mw/com/performance_benchmarks/..." # Uninvestigated problem
+              - "-//score/mw/com/doc/..." # Uninvestigated problem
+              - "-//score/mw/com/design/..." # Uninvestigated problem
+          - bazel-config: "qnx_arm64"
+            identifier: "_arm64"
+            incompatible_targets:
+              - "-//score/mw/com/requirements/..." # Uninvestigated problem
+              - "-//score/mw/com/performance_benchmarks/..." # Uninvestigated problem
+              - "-//score/mw/com/doc/..." # Uninvestigated problem
+              - "-//score/mw/com/design/..." # Uninvestigated problem
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      LICENSE_DIR: "/opt/score_qnx/license"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+      - name: Free Disk Space (Ubuntu)
+        uses: ./actions/free_disk_space
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.15.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-${{ matrix.bazel-config }}
+          repository-cache: true
+      - name: Allow linux-sandbox
+        uses: ./actions/unblock_user_namespace_for_linux_sandbox
+      - name: Setup QNX License
+        if: ${{ contains(matrix.bazel-config, 'qnx') }}
+        env:
+          SCORE_QNX_LICENSE: ${{ secrets.SCORE_QNX_LICENSE }}
+        run: |
+          set -euo pipefail
+
+          sudo mkdir -p "${{ env.LICENSE_DIR }}"
+          echo "${SCORE_QNX_LICENSE}" | base64 --decode | sudo tee "${{ env.LICENSE_DIR }}/licenses" >/dev/null
+      - name: Build targets
+        env:
+          SCORE_QNX_USER: ${{ secrets.SCORE_QNX_USER }}
+          SCORE_QNX_PASSWORD: ${{ secrets.SCORE_QNX_PASSWORD }}
+        run: |
+          bazel build --config ${{ matrix.bazel-config }} -- //score/... ${{ join(matrix.incompatible_targets, ' ') }}
+      - name: Cleanup QNX License
+        if: ${{ contains(matrix.bazel-config, 'qnx') && !cancelled() }}
+        run: sudo rm -rf ${{ env.LICENSE_DIR }}
+        # TODO Run tests on QNX QEMU
