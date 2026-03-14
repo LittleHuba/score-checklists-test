@@ -59,6 +59,8 @@ jobs:
         pull-requests: read
       environment: ${{ case(github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name, 'workflow-approval', '') }}
       steps:
+        - name: Echo env
+          run: echo "${{ case(github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name, 'workflow-approval', '') }}"
         - name: Checkout repository
           uses: actions/checkout@v4.2.2
           with:
